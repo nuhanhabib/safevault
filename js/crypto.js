@@ -63,6 +63,8 @@ export async function decryptWithKey(key, blob) {
 // Throws if the password is wrong or the file was modified.
 export async function unlockVault(password, blob) {
   if (!blob || blob.v !== 1 || blob.kdf !== "PBKDF2-SHA256") throw new Error("Unsupported vault format");
+  // Refuse a planted vault with weak settings (it would make guessing your password fast).
+  if (!Number.isInteger(blob.iter) || blob.iter < 100000) throw new Error("Unsafe vault settings");
   const salt = fromB64(blob.salt);
   const key = await deriveKey(password, salt, blob.iter);
   const data = await decryptWithKey(key, blob);

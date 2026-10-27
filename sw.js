@@ -1,5 +1,5 @@
 // Offline support: caches the app's own files only. Never touches Google requests or your vault.
-const CACHE = "safevault-v1";
+const CACHE = "safevault-v4";
 const FILES = ["./", "index.html", "style.css", "manifest.webmanifest", "js/app.js", "js/crypto.js",
   "js/drive.js", "js/config.js", "icons/icon.svg", "icons/icon-192.png", "icons/icon-512.png"];
 

@@ -16,14 +16,18 @@ let failedAttempts = 0;
 const loadBlob = () => { try { return JSON.parse(localStorage.getItem(STORE_KEY)); } catch { return null; } };
 const storeBlob = (b) => localStorage.setItem(STORE_KEY, JSON.stringify(b));
 
+const driveLinked = () => driveConfigured() && localStorage.getItem("safevault.driveLinked") === "1";
+
 async function persist({ sync = true } = {}) {
   session.data.updatedAt = Date.now();
   const blob = await encryptVault(session.key, session.salt, session.iter, session.data);
   storeBlob(blob);
-  if (sync && driveConfigured() && localStorage.getItem("safevault.driveLinked") === "1") {
-    uploadVault(blob).then(() => setSyncStatus("Saved to Google Drive")).catch((e) => setSyncStatus("Drive: " + e.message));
-  }
+  // Always pull + merge before pushing, so a stale device never overwrites newer data in Drive.
+  if (sync && driveLinked()) syncNow({ quiet: true });
 }
+
+// Ask the browser not to evict our storage when the device runs low on space.
+if (navigator.storage && navigator.storage.persist) navigator.storage.persist().catch(() => {});
 
 // ---------- screens ----------
 function show(name) {
@@ -35,6 +39,23 @@ function toast(msg, ms = 2500) {
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), ms);
 }
 function setSyncStatus(msg) { $("s-sync-status").textContent = msg; }
+function lastSyncText() {
+  const t = +localStorage.getItem("safevault.lastSync");
+  return t ? "Last synced " + new Date(t).toLocaleString() : "Not synced yet";
+}
+
+// Password prompt as a dialog (window.prompt would show the password in plain text).
+function askPassword(msg) {
+  return new Promise((resolve) => {
+    const d = $("dlg-pw");
+    $("p-msg").textContent = msg; $("p-pw").value = ""; d.returnValue = "";
+    d.addEventListener("close", () => {
+      const v = d.returnValue === "ok" ? $("p-pw").value : null;
+      $("p-pw").value = ""; resolve(v);
+    }, { once: true });
+    d.showModal();
+  });
+}
 
 function meter(el, pw) {
   const bits = estimateBits(pw);
@@ -77,12 +98,27 @@ $("btn-restore-drive").addEventListener("click", async () => {
 $("btn-restore-file").addEventListener("click", () => $("file-import").click());
 $("file-import").addEventListener("change", async (e) => {
   const f = e.target.files[0]; if (!f) return;
-  try {
-    const blob = JSON.parse(await f.text());
-    if (blob.v !== 1 || !blob.ct) throw new Error();
-    storeBlob(blob); toast("Backup imported. Enter its master password."); show("lock");
-  } catch { toast("That isn't a valid SafeVault backup"); }
   e.target.value = "";
+  let blob;
+  try {
+    blob = JSON.parse(await f.text());
+    if (blob.v !== 1 || !blob.ct) throw new Error();
+  } catch { return toast("That isn't a valid SafeVault backup"); }
+  if (!session) { storeBlob(blob); toast("Backup imported. Enter its master password."); return show("lock"); }
+
+  // Unlocked: merge the backup into the current vault (newer version of each entry wins).
+  let data;
+  try { data = await decryptWithKey(session.key, blob); }
+  catch {
+    const pw = await askPassword("This backup uses a different master password. Enter that password to import it.");
+    if (!pw) return;
+    try { data = (await unlockVault(pw, blob)).data; } catch { return toast("Wrong password for this backup"); }
+  }
+  if (!session) return;
+  const before = liveEntries().length;
+  session.data.entries = mergeEntries(session.data.entries, data.entries || []);
+  await persist(); render();
+  toast(`Imported. ${liveEntries().length - before} new password(s) added.`, 3500);
 });
 
 // ---------- unlock / lock ----------
@@ -94,6 +130,8 @@ $("form-unlock").addEventListener("submit", async (e) => {
     session = await unlockVault($("unlock-pw").value, loadBlob());
     failedAttempts = 0;
     $("unlock-pw").value = "";
+    $("lock-logo").firstElementChild.classList.add("open"); // shackle pops open
+    await new Promise((r) => setTimeout(r, 300));
     enterMain();
   } catch {
     failedAttempts++;
@@ -115,10 +153,14 @@ function lock() {
   clearTimeout(idleTimer); clearTimeout(hiddenTimer);
   for (const d of document.querySelectorAll("dialog")) d.open && d.close();
   $("list").replaceChildren(); $("search").value = "";
-  for (const id of ["e-pass", "g-out", "c-old", "c-new", "c-new2"]) $(id).value = "";
+  for (const id of ["e-pass", "g-out", "c-old", "c-new", "c-new2", "p-pw"]) $(id).value = "";
+  $("lock-logo").firstElementChild.classList.remove("open");
   if (loadBlob()) show("lock"); else show("setup");
 }
-$("btn-lock").addEventListener("click", lock);
+$("btn-lock").addEventListener("click", () => {
+  $("lock-ic").classList.remove("open"); // shackle snaps shut, then lock
+  setTimeout(lock, 300);
+});
 
 function resetIdle() {
   if (!session) return;
@@ -131,7 +173,13 @@ document.addEventListener("visibilitychange", () => {
   if (document.hidden && session) hiddenTimer = setTimeout(lock, HIDDEN_LOCK_SECONDS * 1000);
 });
 
-function enterMain() { show("main"); render(); resetIdle(); }
+function enterMain() {
+  show("main"); render(); resetIdle();
+  $("lock-ic").classList.add("open");
+  if (driveLinked()) syncNow({ quiet: true }); // pick up changes made on other devices
+}
+// Retry a sync that failed while offline as soon as the connection comes back.
+addEventListener("online", () => { if (session && localStorage.getItem("safevault.pendingSync")) syncNow({ quiet: true }); });
 
 // ---------- list ----------
 const liveEntries = () => session.data.entries.filter((x) => !x.deleted);
@@ -215,34 +263,75 @@ function mergeEntries(a, b) {
   for (const x of [...a, ...b]) { const cur = map.get(x.id); if (!cur || (x.updated || 0) > (cur.updated || 0)) map.set(x.id, x); }
   return [...map.values()];
 }
-async function syncNow() {
-  if (!driveConfigured()) return toast("Drive isn't set up yet — see README", 4000);
-  setSyncStatus("Syncing…"); toast("Syncing with Google Drive…");
+// The master password was changed on another device: ask for the new one and switch to it,
+// keeping any entries that only exist on this device.
+async function adoptRemotePassword(remote) {
+  const pw = await askPassword("Your master password was changed on another device. Enter the NEW master password to keep syncing.");
+  if (!pw || !session) return false;
+  try {
+    const s = await unlockVault(pw, remote);
+    s.data.entries = mergeEntries(session.data.entries, s.data.entries || []);
+    session = s;
+    toast("Master password updated on this device", 3500);
+    return true;
+  } catch { toast("That password didn't work", 3500); return false; }
+}
+
+async function doSync({ quiet = false } = {}) {
+  if (!driveConfigured()) { if (!quiet) toast("Drive isn't set up yet — see README", 4000); return false; }
+  if (!session) return false;
+  setSyncStatus("Syncing…"); if (!quiet) toast("Syncing with Google Drive…");
   try {
     const remote = await downloadVault();
-    if (remote) {
-      let remoteData;
+    if (remote && session) {
+      let remoteData = null;
       try { remoteData = await decryptWithKey(session.key, remote); }
       catch {
-        // Different salt means the master password was changed on another device.
-        setSyncStatus("The Drive vault uses a different master password. Lock, erase this device's vault, then 'Restore from Google Drive'.");
-        return toast("Sync stopped: master password differs", 4000);
+        if (localStorage.getItem("safevault.pwChangedPending")) {
+          // We changed the password here but the upload didn't finish; our copy is the newest.
+        } else if (!(await adoptRemotePassword(remote))) {
+          setSyncStatus("Sync paused: the Drive vault uses a different master password. Tap Sync now to enter it.");
+          return false;
+        }
       }
-      session.data.entries = mergeEntries(session.data.entries, remoteData.entries || []);
+      if (remoteData) session.data.entries = mergeEntries(session.data.entries, remoteData.entries || []);
     }
+    if (!session) return false; // locked while syncing
     localStorage.setItem("safevault.driveLinked", "1");
     await persist({ sync: false });
     await uploadVault(loadBlob());
-    render(); setSyncStatus("Last synced " + new Date().toLocaleString()); toast("Synced ✓");
-  } catch (e) { setSyncStatus("Sync failed: " + e.message); toast("Sync failed: " + e.message, 4000); }
+    for (const k of ["safevault.pendingSync", "safevault.pwChangedPending"]) localStorage.removeItem(k);
+    localStorage.setItem("safevault.lastSync", Date.now());
+    if (session) render();
+    setSyncStatus(lastSyncText()); if (!quiet) toast("Synced ✓");
+    return true;
+  } catch (e) {
+    localStorage.setItem("safevault.pendingSync", "1");
+    setSyncStatus(`Not synced (${e.message}). It will retry automatically.`);
+    if (!quiet) toast("Sync failed: " + e.message, 4000);
+    return false;
+  }
 }
-$("btn-sync").addEventListener("click", syncNow);
-$("s-sync").addEventListener("click", syncNow);
+// Run syncs one at a time so two saves can't race each other.
+let syncQueue = Promise.resolve();
+let activeSyncs = 0; // spins the cloud icon while any sync is running
+function syncNow(opts) {
+  activeSyncs++; $("btn-sync").classList.add("syncing");
+  return (syncQueue = syncQueue.then(() => doSync(opts)).finally(() => {
+    if (--activeSyncs === 0) $("btn-sync").classList.remove("syncing");
+  }));
+}
+
+$("btn-sync").addEventListener("click", () => syncNow());
+$("s-sync").addEventListener("click", () => syncNow());
 $("s-signout").addEventListener("click", () => { signOutDrive(); localStorage.removeItem("safevault.driveLinked"); setSyncStatus("Disconnected from Google"); });
 
 // ---------- settings ----------
+let gearTurn = 0;
 $("btn-settings").addEventListener("click", () => {
-  if (!driveConfigured()) setSyncStatus("Not configured: add your Google Client ID in js/config.js");
+  $("btn-settings").querySelector(".gear").style.transform = `rotate(${(gearTurn += 180)}deg)`;
+  setSyncStatus(!driveConfigured() ? "Not configured: add your Google Client ID in js/config.js"
+    : driveLinked() ? lastSyncText() : "Not connected. Tap Sync now to connect your Google account.");
   $("g-out").value = generatePassword(+$("g-len").value); $("dlg-settings").showModal();
 });
 $("s-close").addEventListener("click", () => { $("g-out").value = ""; $("dlg-settings").close(); });
@@ -257,6 +346,7 @@ $("s-export").addEventListener("click", () => {
   a.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   toast("Encrypted backup downloaded");
 });
+$("s-import").addEventListener("click", () => $("file-import").click());
 
 $("s-change").addEventListener("click", () => { $("c-error").hidden = true; $("dlg-change").showModal(); });
 $("c-cancel").addEventListener("click", () => $("dlg-change").close());
@@ -266,12 +356,17 @@ $("form-change").addEventListener("submit", async (e) => {
   if ($("c-new").value !== $("c-new2").value) return err("New passwords don't match");
   if ($("c-new").value.length < 10) return err("Use at least 10 characters");
   try { await unlockVault($("c-old").value, loadBlob()); } catch { return err("Current password is wrong"); }
+  // Pull in other devices' changes first, so re-uploading under the new password loses nothing.
+  if (driveLinked() && !(await syncNow({ quiet: true })))
+    return err("Couldn't sync with Google Drive first. Check your internet and try again, or Disconnect Google in Settings.");
   const salt = randomBytes(16);
   session.key = await deriveKey($("c-new").value, salt, KDF_ITERATIONS);
   session.salt = salt; session.iter = KDF_ITERATIONS;
   for (const id of ["c-old", "c-new", "c-new2"]) $(id).value = "";
-  await persist();
-  $("dlg-change").close(); toast("Master password changed");
+  if (driveLinked()) localStorage.setItem("safevault.pwChangedPending", "1");
+  await persist({ sync: false });
+  if (driveLinked()) syncNow({ quiet: true });
+  $("dlg-change").close(); toast("Master password changed. Use the new one on your other devices too.", 4000);
 });
 
 // ---------- start ----------
@@ -279,5 +374,11 @@ if (!window.isSecureContext || !crypto.subtle) {
   document.body.textContent = "SafeVault must be opened over HTTPS (or localhost) for security.";
 } else {
   show(loadBlob() ? "lock" : "setup");
-  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+  if ("serviceWorker" in navigator) {
+    // When a new version takes over, offer a reload instead of reloading under the user (that would lock the vault).
+    const hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener("controllerchange", () => { if (hadController) $("update-bar").hidden = false; });
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+  $("update-reload").addEventListener("click", () => location.reload());
 }

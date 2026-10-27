@@ -102,7 +102,8 @@ The Client ID is public, so committing it is fine. **Never** commit a client *se
 ## 💻 Run it on your computer
 
 ```bash
-python3 -m http.server 8000
+npx http-server -p 8000 -c-1      # needs Node.js
+# or: python -m http.server 8000   # needs Python
 # open http://localhost:8000
 ```
 It must be served over `http://localhost` or `https://`. Opening `index.html` directly won't work, because browsers disable the encryption APIs on `file://`.
