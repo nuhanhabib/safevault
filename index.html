@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <!-- Content Security Policy: only our own code may run; network only to Google sign-in & Drive. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://accounts.google.com/gsi/client; connect-src 'self' https://www.googleapis.com https://accounts.google.com/gsi/; frame-src https://accounts.google.com/gsi/; style-src 'self' https://accounts.google.com/gsi/style; img-src 'self' data:; object-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="theme-color" content="#0f172a">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>SafeVault</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Create vault -->
+  <section id="screen-setup" class="screen center" hidden>
+    <div class="card narrow">
+      <div class="logo">🔐</div>
+      <h1>Welcome to SafeVault</h1>
+      <p class="muted">Create one strong master password. It is the only password you'll need to remember.</p>
+      <p class="warn">We can't recover it. If you forget it, your vault can't be opened by anyone, including you.</p>
+      <form id="form-setup" autocomplete="off">
+        <label>Master password<input type="password" id="setup-pw" minlength="10" required autocomplete="new-password"></label>
+        <div class="meter"><div id="setup-meter"></div></div>
+        <small id="setup-hint" class="muted">At least 10 characters. A long sentence is great.</small>
+        <label>Confirm master password<input type="password" id="setup-pw2" required autocomplete="new-password"></label>
+        <button class="primary" type="submit">Create my vault</button>
+      </form>
+      <div class="divider">or, already have a vault?</div>
+      <div class="row">
+        <button id="btn-restore-drive" type="button">Restore from Google Drive</button>
+        <button id="btn-restore-file" type="button">Import backup file</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Unlock -->
+  <section id="screen-lock" class="screen center" hidden>
+    <div class="card narrow">
+      <div class="logo">🔒</div>
+      <h1>SafeVault is locked</h1>
+      <form id="form-unlock" autocomplete="off">
+        <label>Master password<input type="password" id="unlock-pw" required autocomplete="current-password" autofocus></label>
+        <button class="primary" type="submit" id="btn-unlock">Unlock</button>
+      </form>
+      <p id="unlock-error" class="error" hidden></p>
+      <button id="btn-reset" class="link danger" type="button">Erase this device's vault…</button>
+    </div>
+  </section>
+
+  <!-- Main -->
+  <section id="screen-main" class="screen" hidden>
+    <header class="topbar">
+      <span class="brand">🔐 SafeVault</span>
+      <div class="actions">
+        <button id="btn-sync" title="Sync with Google Drive" aria-label="Sync">☁️</button>
+        <button id="btn-settings" title="Settings" aria-label="Settings">⚙️</button>
+        <button id="btn-lock" title="Lock now" aria-label="Lock">🔒</button>
+      </div>
+    </header>
+    <div class="toolbar">
+      <input type="search" id="search" placeholder="Search Facebook, Gmail, bank…" autocomplete="off">
+    </div>
+    <ul id="list" class="list"></ul>
+    <p id="empty" class="muted center-text" hidden>No passwords yet. Tap + to add your first one.</p>
+    <button id="btn-add" class="fab" aria-label="Add password">+</button>
+  </section>
+
+  <!-- Entry editor -->
+  <dialog id="dlg-entry">
+    <form id="form-entry" method="dialog" autocomplete="off">
+      <h2 id="entry-title">Add password</h2>
+      <label>Name (e.g. Facebook)<input id="e-title" required maxlength="100"></label>
+      <label>Username / email / phone<input id="e-user" maxlength="200" autocomplete="off"></label>
+      <label>Password
+        <div class="pwrow">
+          <input type="password" id="e-pass" maxlength="500" autocomplete="new-password">
+          <button type="button" id="e-show" aria-label="Show password">👁</button>
+          <button type="button" id="e-gen" title="Generate strong password">🎲</button>
+        </div>
+      </label>
+      <div class="meter"><div id="e-meter"></div></div>
+      <label>Website (optional)<input id="e-url" maxlength="300" inputmode="url"></label>
+      <label>Notes (optional)<textarea id="e-notes" rows="3" maxlength="2000"></textarea></label>
+      <div class="row end">
+        <button type="button" id="e-delete" class="danger" hidden>Delete</button>
+        <span class="grow"></span>
+        <button type="button" id="e-cancel">Cancel</button>
+        <button type="submit" class="primary">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- Settings -->
+  <dialog id="dlg-settings">
+    <div class="settings">
+      <h2>Settings</h2>
+      <h3>Google Drive sync</h3>
+      <p class="muted small">Only the encrypted vault is uploaded, into a hidden app folder. Google can't read your passwords.</p>
+      <div class="row"><button id="s-sync">Sync now</button><button id="s-signout">Disconnect Google</button></div>
+      <p id="s-sync-status" class="muted small"></p>
+      <h3>Backup</h3>
+      <div class="row"><button id="s-export">Download encrypted backup</button></div>
+      <h3>Security</h3>
+      <div class="row"><button id="s-change">Change master password</button></div>
+      <h3>Password generator</h3>
+      <div class="pwrow"><input id="g-out" readonly><button id="g-copy">Copy</button><button id="g-new">🎲</button></div>
+      <label class="inline">Length <input type="range" id="g-len" min="12" max="64" value="20"> <span id="g-len-v">20</span></label>
+      <div class="row end"><button id="s-close" class="primary">Close</button></div>
+    </div>
+  </dialog>
+
+  <!-- Change password -->
+  <dialog id="dlg-change">
+    <form id="form-change" method="dialog" autocomplete="off">
+      <h2>Change master password</h2>
+      <label>Current password<input type="password" id="c-old" required autocomplete="current-password"></label>
+      <label>New password<input type="password" id="c-new" minlength="10" required autocomplete="new-password"></label>
+      <label>Confirm new password<input type="password" id="c-new2" required autocomplete="new-password"></label>
+      <p id="c-error" class="error" hidden></p>
+      <div class="row end"><button type="button" id="c-cancel">Cancel</button><button type="submit" class="primary">Change</button></div>
+    </form>
+  </dialog>
+
+  <input type="file" id="file-import" accept="application/json,.json" hidden>
+  <div id="toast" role="status" aria-live="polite" hidden></div>
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

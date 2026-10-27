@@ -1,0 +1,7 @@
+# Never commit vaults, backups or secrets
+*.backup.json
+safevault-backup-*.json
+client_secret*.json
+.env
+node_modules/
+.DS_Store
